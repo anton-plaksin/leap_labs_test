@@ -4,41 +4,33 @@ import torch
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from torchvision.models import resnet50, ResNet50_Weights
 from noise_model import NoiseModel
 
 
-def encode_image(image: np.array) -> np.array:
-    'change the axes and scale the image numpy array'
+def encode_image(image: np.array) -> torch.tensor:
+    'Change the axes, scale the image numpy array, and transfer it to the tensor'
     image = np.transpose(image, axes=(2,1,0)) / 255
-    return image
+    return torch.tensor(image)
 
 
-def decode_image(image: np.array) -> np.array:
-    'return the initial axes and the scale the image numpy array'
-    image = np.clip((255 * image).astype(np.uint16), 0, 255)
+def decode_image(image: torch.tensor) -> np.array:
+    'Return the initial axes and the scale the image numpy array'
+    image = np.clip((255 * image.data.numpy()).astype(np.uint16), 0, 255)
     image = np.transpose(image, axes=(2,1,0))
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     return image
-
-
-def calculate_init_class_id(class_id: int) -> int:
-    'calculate class id in imagenet by class id in imagenette'
-
-    with open("imagenette_classes.json", 'r') as f:
-        imagenette_classes = json.load(f)
-    weights = ResNet50_Weights.DEFAULT
-    imagenette_name = imagenette_classes[class_id]
-    imagenet_names = np.array(weights.meta["categories"])
-
-    return np.where(imagenet_names == imagenette_name)[0][0]
 
 
 def get_noisy_image(init_image: np.array, 
-                    init_class_id: int, 
-                    lr: float = 1e-3, 
-                    epoch_n: int = 1000):
-    'add noise to the image such that the classificator make a mistake'
+                    target_class: int, 
+                    lr: float, 
+                    epoch_n: int, 
+                    noise_coef: int):
+    'Add noise to the image such that the classificator make a mistake'
+
+    #encode initial image
+    init_image = encode_image(init_image)
 
     #define the noise model
     noise = NoiseModel(shape=init_image.shape)
@@ -48,56 +40,61 @@ def get_noisy_image(init_image: np.array,
     model = resnet50(weights=weights)
     model.eval()
 
-    #define preprocess 
+    #define preprocess, loss_function, optimizer
     preprocess = weights.transforms()
     loss_function = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(params=noise.parameters(), lr=lr)
 
-    for _ in range(epoch_n):
+    #find the initial class
+    logits = model(preprocess(init_image).unsqueeze(0))
+    init_class = logits[0].argmax().item()
 
-        #define noisy image
-        noisy_image = torch.tensor(init_image) + noise()
+    for _ in tqdm(range(epoch_n)):
 
-        #predict new class id
+        #define the noisy image
+        noisy_image = init_image + noise()
+
+        #predict the new class
         noisy_image = preprocess(noisy_image)
         logits = model(noisy_image.unsqueeze(0))
-        new_class_id = logits[0].argmax().item()
-        print(new_class_id)
+        new_class = logits[0].argmax().item()
 
-        #if new_class_id=init_class_id make gradient step, else break
-        if new_class_id == init_class_id:
-            loss = -loss_function(logits, torch.tensor([init_class_id]))
+        #if new_class = target_class break else make a gradient step
+        if new_class == target_class:
+            break
+
+        else:
+            loss = loss_function(logits, torch.tensor([target_class])) + noise_coef * torch.mean((noise()) ** 2)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
 
-        else:
-            break
-
-    return init_image + noise().data.numpy(), new_class_id
+    #decode noisy image
+    new_image = decode_image(init_image + noise())
+    return init_class, new_image, new_class
 
 
 def show_results(init_image: np.array, 
-                 init_class_id: int, 
+                 init_class: int, 
                  new_image: np.array, 
-                 new_class_id: int):
-    'show the initial image and class and the noisy image and new class'
+                 target_class: int, 
+                 new_class:int):
+    'Show the initial image and class and the noisy image and new class'
 
-    if (init_image == new_image).all():
-        print('The initial classification is incorrect')
+    if target_class != new_class:
+        print('Warring! The target class not reached, increase number of epoch')
 
-    else:
-        weights = ResNet50_Weights.DEFAULT
-        imagenet_names = np.array(weights.meta["categories"])
+    weights = ResNet50_Weights.DEFAULT
+    imagenet_names = np.array(weights.meta["categories"])
 
-        _, (ax1, ax2) = plt.subplots(1, 2)
-        ax1.imshow(decode_image(init_image))
-        ax1.set_title(f'Initial Class: {imagenet_names[init_class_id]}')
+    _, (ax1, ax2) = plt.subplots(1, 2)
+    ax1.imshow(cv2.cvtColor(init_image, cv2.COLOR_BGR2RGB))
+    ax1.set_title(f'Initial Class: {imagenet_names[init_class]}')
 
-        ax2.imshow(decode_image(new_image))
-        ax2.set_title(f'New Class: {imagenet_names[new_class_id]}')
+    ax2.imshow(cv2.cvtColor(new_image, cv2.COLOR_BGR2RGB))
+    ax2.set_title(f'New Class: {imagenet_names[new_class]}')
 
-        plt.show()
+    plt.show()
 
 
 #run the script
@@ -106,20 +103,27 @@ if __name__ == '__main__':
     #parse the arguments
     ap = argparse.ArgumentParser()
     ap.add_argument("--image_path", required=True, type=str)
-    ap.add_argument("--class_id", required=True, type=int)
+    ap.add_argument("--target_class", required=True, type=int)
+    ap.add_argument("--epoch_n", default=250, type=int)
+    ap.add_argument("--lr", default=1e-3, type=float)
+    ap.add_argument("--noise_coef", default=1e6, type=float)
     args = vars(ap.parse_args())
 
-    #load initial image and initial class id according to imagenet
-    init_image = encode_image(cv2.imread(args["image_path"]))
-    init_class_id = calculate_init_class_id(args["class_id"])
+    #load initial image and target_class
+    init_image = cv2.imread(args["image_path"])
+    target_class = args["target_class"]
 
-    #apply some noise to the initial image to change their class
-    new_image, new_class_id = get_noisy_image(init_image=init_image, 
-                                              init_class_id=init_class_id)
+    #add some noise to the initial image to change their class to target one
+    init_class, new_image, new_class = get_noisy_image(init_image=init_image, 
+                                                       target_class=target_class, 
+                                                       lr=args["lr"], 
+                                                       epoch_n=args["epoch_n"], 
+                                                       noise_coef=args["noise_coef"])
 
 
     #show the results
     show_results(init_image=init_image, 
-                 init_class_id=init_class_id, 
+                 init_class=init_class, 
                  new_image=new_image, 
-                 new_class_id=new_class_id)
+                 target_class=target_class, 
+                 new_class=new_class)

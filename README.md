@@ -13,9 +13,13 @@ Our algorithm takes as input:
 
 An example of a launch might look like this:
 
-???
+```    
+python run.py --image_path .\image_examples\3_chain_saw.jpeg --target_class 100
+```
 
-The result is the demonstration of the initial image and class and the new image and class. 
+The result is the demonstration of the initial image and class and the new image and class. With the parameters specified in the example above it might look like this
+
+![alt text](leap_labs_test/pics/result_example.png)
 
 
 **Remark:** It may happen that the algorithm does not reach the target class. In this case, you will see a warning: *"Warring! The target class is not reached, increase the number of epochs"*

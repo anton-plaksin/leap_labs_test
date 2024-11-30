@@ -1,5 +1,4 @@
 import cv2
-import json
 import torch
 import argparse
 import numpy as np
